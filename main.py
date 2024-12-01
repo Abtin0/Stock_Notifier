@@ -1,70 +1,88 @@
 from twilio.rest import Client
 import requests
-from datetime import *
+from datetime import datetime, timedelta
+import os
 
+# Constants
 STOCK = "TSLA"
 COMPANY_NAME = "Tesla Inc"
-STOCKS_API_KEY = "YBFA8NAHGA1DXQCQ"
-stocks_endpoint = "https://www.alphavantage.co/query?"
-stocks_params = {
-    "apikey": STOCKS_API_KEY,
-    "function": "TIME_SERIES_DAILY",
-    "symbol": STOCK
-}
-news_endpoint = "https://newsapi.org/v2/everything"
-NEWS_API_KEY = "d9a9f18e39ff4e50b7368a3cb0e3dc46"
-news_params = {
-    "q": COMPANY_NAME,
-    "apiKey": NEWS_API_KEY,
-}
-account_sid = "AC8d1e6921377ea53ef02cd970c1b0d813"
-auth_token = "81427fb98b4fd53272d222300b8016dc"
-client = Client(account_sid, auth_token)
+STOCKS_API_URL = "https://www.alphavantage.co/query"
+NEWS_API_URL = "https://newsapi.org/v2/everything"
 
+# Environment variables for sensitive data
+STOCKS_API_KEY = os.getenv("STOCKS_API_KEY")
+NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
+USER_PHONE_NUMBER = os.getenv("USER_PHONE_NUMBER")
 
+# Helper function to calculate percentage change
 def change_percentage(yesterday_price, day_before_yesterday_price):
     percentage_change = ((yesterday_price - day_before_yesterday_price) / day_before_yesterday_price) * 100
-    if percentage_change > 0:
-        return "🔺", round(abs(percentage_change))
-    if percentage_change < 0:
-        return "🔻", round(abs(percentage_change))
+    emoji = "🔺" if percentage_change > 0 else "🔻"
+    return emoji, round(abs(percentage_change))
 
+# Fetch stock data
+def fetch_stock_data(stock_symbol):
+    params = {
+        "apikey": STOCKS_API_KEY,
+        "function": "TIME_SERIES_DAILY",
+        "symbol": stock_symbol,
+    }
+    response = requests.get(STOCKS_API_URL, params=params)
+    response.raise_for_status()
+    return response.json()
 
-yesterday = (datetime.now() - timedelta(days=1)).date()
-before_yesterday = (datetime.now() - timedelta(days=2)).date()
+# Fetch news articles
+def fetch_news_articles(company_name):
+    params = {"q": company_name, "apiKey": NEWS_API_KEY}
+    response = requests.get(NEWS_API_URL, params=params)
+    response.raise_for_status()
+    return response.json()
 
-stocks_r = requests.get(stocks_endpoint, params=stocks_params)
-if stocks_r.status_code != 200:
-    raise Exception("Failed to fetch stock data")
-try:
-    stocks_data: dict = stocks_r.json()
-    daily_prices = stocks_data["Time Series (Daily)"]
-except KeyError:
-    raise Exception("Failed to fetch stock data. You have used your free daily 25 requests.")
+# Main function
+def main():
+    try:
+        # Dates
+        yesterday = (datetime.now() - timedelta(days=1)).date()
+        before_yesterday = (datetime.now() - timedelta(days=2)).date()
 
-try:
-    opening_y = float(daily_prices[str(yesterday)]["1. open"])
-    opening_before = float(daily_prices[str(before_yesterday)]["1. open"])
+        # Stock data
+        stocks_data = fetch_stock_data(STOCK)
+        daily_prices = stocks_data["Time Series (Daily)"]
+        opening_y = float(daily_prices[str(yesterday)]["1. open"])
+        opening_before = float(daily_prices[str(before_yesterday)]["1. open"])
 
-    if change_percentage(opening_y, opening_before)[1] >= 5:
-        news_data: dict = requests.get(news_endpoint, params=news_params).json()
-        if news_data.status_code != 200:
-            raise Exception("Failed to fetch stock data")
-        articles = news_data["articles"]
-        news_body = ""
-        for i in range(3):
-            publisher = articles[i]["source"]["name"]
-            title = articles[i]["title"]
-            description = articles[i]["description"]
-            news_body += f"{publisher}\n{title}\n{description}\n\n"
+        # Check significant change
         emoji, percentage = change_percentage(opening_y, opening_before)
-        message_body = f"{STOCK}: {str(emoji)} {str(percentage)}%\n\n" + news_body
+        if percentage >= 5:
+            news_data = fetch_news_articles(COMPANY_NAME)
+            articles = news_data["articles"][:3]
 
-except KeyError:
-    print("NASDAQ was closed yesterday or the day before")
+            # Prepare news body
+            news_body = "\n\n".join(
+                f"{article['source']['name']}\n{article['title']}\n{article['description']}"
+                for article in articles
+            )
 
-message = client.messages.create(
-    from_="+17753805686",
-    to="+16476739180",
-    body=message_body
-)
+            # Message body
+            message_body = f"{STOCK}: {emoji} {percentage}%\n\n{news_body}"
+
+            # Send SMS
+            client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+            message = client.messages.create(
+                from_=TWILIO_PHONE_NUMBER,
+                to=USER_PHONE_NUMBER,
+                body=message_body,
+            )
+            print(f"Message sent: {message.sid}")
+        else:
+            print("Stock change less than 5%. No message sent.")
+    except KeyError as e:
+        print(f"Data issue: {e}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+if __name__ == "__main__":
+    main()
